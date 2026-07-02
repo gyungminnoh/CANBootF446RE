@@ -59,6 +59,18 @@ class BootloaderError(RuntimeError):
     pass
 
 
+class BootloaderNackError(BootloaderError):
+    pass
+
+
+class BootloaderTimeoutError(BootloaderError):
+    pass
+
+
+class BootloaderSendError(BootloaderError):
+    pass
+
+
 class BootloaderTransferError(BootloaderError):
     pass
 
@@ -75,7 +87,8 @@ def make_frame(cmd, payload=b""):
 
 
 class CanBootClient:
-    def __init__(self, interface, channel, bitrate, timeout, erase_timeout):
+    def __init__(self, interface, channel, bitrate, timeout, erase_timeout,
+                 retries):
         if can is None:
             raise BootloaderError("python-can is not installed")
 
@@ -89,6 +102,7 @@ class CanBootClient:
         self.bus = can.Bus(**kwargs)
         self.timeout = timeout
         self.erase_timeout = erase_timeout
+        self.retries = retries
 
     def close(self):
         self.bus.shutdown()
@@ -98,9 +112,12 @@ class CanBootClient:
             pass
 
     def send(self, data, arbitration_id=HOST_CMD_ID):
-        self.bus.send(can.Message(arbitration_id=arbitration_id,
-                                  data=data,
-                                  is_extended_id=False))
+        try:
+            self.bus.send(can.Message(arbitration_id=arbitration_id,
+                                      data=data,
+                                      is_extended_id=False))
+        except can.CanError as exc:
+            raise BootloaderSendError(str(exc)) from exc
 
     def recv_response(self, expected_cmd, timeout=None):
         if timeout is None:
@@ -119,17 +136,36 @@ class CanBootClient:
                 return data
             if data[0] == NACK and data[1] == expected_cmd:
                 error_name = ERROR_NAMES.get(data[2], "UNKNOWN_ERROR")
-                raise BootloaderError(
+                raise BootloaderNackError(
                     f"NACK for cmd 0x{expected_cmd:02X}: "
                     f"{error_name} (0x{data[2]:02X})"
                 )
 
-        raise BootloaderError(f"timeout waiting for cmd 0x{expected_cmd:02X}")
+        raise BootloaderTimeoutError(f"timeout waiting for cmd 0x{expected_cmd:02X}")
 
-    def command(self, cmd, payload=b""):
-        self.drain_rx()
-        self.send(make_frame(cmd, payload))
-        return self.recv_response(cmd)
+    def transact(self, arbitration_id, data, expected_cmd, timeout=None,
+                 retryable=True):
+        attempts = self.retries + 1 if retryable else 1
+        last_error = None
+
+        for attempt in range(attempts):
+            self.drain_rx()
+            try:
+                self.send(data, arbitration_id=arbitration_id)
+                return self.recv_response(expected_cmd, timeout=timeout)
+            except BootloaderNackError:
+                raise
+            except (BootloaderTimeoutError, BootloaderSendError) as exc:
+                last_error = exc
+                if attempt + 1 >= attempts:
+                    break
+                time.sleep(0.02 * (attempt + 1))
+
+        raise last_error
+
+    def command(self, cmd, payload=b"", timeout=None, retryable=True):
+        return self.transact(HOST_CMD_ID, make_frame(cmd, payload), cmd,
+                             timeout=timeout, retryable=retryable)
 
     def ping(self):
         return self.command(CMD_PING)
@@ -138,9 +174,7 @@ class CanBootClient:
         return self.command(CMD_INFO, bytes([page]))
 
     def erase(self):
-        self.drain_rx()
-        self.send(make_frame(CMD_ERASE))
-        return self.recv_response(CMD_ERASE, timeout=self.erase_timeout)
+        return self.command(CMD_ERASE, timeout=self.erase_timeout)
 
     def set_addr(self, address):
         return self.command(CMD_SET_ADDR, struct.pack("<I", address))
@@ -150,9 +184,8 @@ class CanBootClient:
             raise ValueError("word_bytes must be exactly 4 bytes")
         header = bytes([CMD_DATA, seq & 0xFF, (seq >> 8) & 0xFF]) + word_bytes
         data = header + bytes([checksum8(header)])
-        self.drain_rx()
-        self.send(data)
-        return self.recv_response(CMD_DATA)
+        return self.transact(HOST_CMD_ID, data, CMD_DATA,
+                             retryable=True)
 
     def write_data8(self, data, seq=None):
         if len(data) != 8:
@@ -160,18 +193,17 @@ class CanBootClient:
         arbitration_id = HOST_DATA_ID
         if seq is not None:
             arbitration_id = HOST_SEQ_DATA_BASE_ID | (seq & 0xFF)
-        self.drain_rx()
-        self.send(data, arbitration_id=arbitration_id)
-        return self.recv_response(CMD_DATA)
+        return self.transact(arbitration_id, data, CMD_DATA,
+                             retryable=(seq is not None))
 
     def crc(self, expected_crc):
         return self.command(CMD_CRC, struct.pack("<I", expected_crc))
 
     def boot(self):
-        return self.command(CMD_BOOT)
+        return self.command(CMD_BOOT, retryable=False)
 
     def reset(self):
-        return self.command(CMD_RESET)
+        return self.command(CMD_RESET, retryable=False)
 
 
 def pad_firmware(data, alignment):
@@ -229,6 +261,22 @@ def upload(client, firmware, address, do_erase, do_crc, do_boot, legacy_data,
             file=sys.stderr
         )
 
+    padded_for_size = pad_firmware(firmware, 4 if legacy_data else 8)
+    if address < app_start or address + len(padded_for_size) > app_end:
+        raise BootloaderError(
+            f"firmware does not fit app region: "
+            f"0x{address:08X}-0x{address + len(padded_for_size):08X}, "
+            f"allowed 0x{app_start:08X}-0x{app_end:08X}"
+        )
+
+    if not do_erase and app_state != "VALID":
+        raise BootloaderError(
+            f"--no-erase is unsafe while app state is {app_state}"
+        )
+
+    if app_state != "VALID":
+        print(f"Previous app state is {app_state}; a full upload is required")
+
     if do_erase:
         print("Erasing app region...")
         client.erase()
@@ -238,7 +286,7 @@ def upload(client, firmware, address, do_erase, do_crc, do_boot, legacy_data,
     print(f"SET_ADDR ok: 0x{address:08X}")
 
     if legacy_data:
-        padded = pad_firmware(firmware, 4)
+        padded = padded_for_size
         total_words = len(padded) // 4
 
         for seq in range(total_words):
@@ -254,7 +302,7 @@ def upload(client, firmware, address, do_erase, do_crc, do_boot, legacy_data,
             if (seq + 1) % 256 == 0 or seq + 1 == total_words:
                 print(f"Wrote {seq + 1}/{total_words} words")
     else:
-        padded = pad_firmware(firmware, 8)
+        padded = padded_for_size
         total_frames = len(padded) // 8
 
         for frame in range(total_frames):
@@ -291,6 +339,8 @@ def parse_args(argv):
     parser.add_argument("--address", type=lambda x: int(x, 0), default=APP_START_ADDR)
     parser.add_argument("--timeout", type=float, default=2.0)
     parser.add_argument("--erase-timeout", type=float, default=10.0)
+    parser.add_argument("--retries", type=int, default=3,
+                        help="retry count for retry-safe transfers")
     parser.add_argument("--no-erase", action="store_true")
     parser.add_argument("--no-crc", action="store_true")
     parser.add_argument("--boot", action="store_true", help="send CMD_BOOT after upload")
@@ -311,8 +361,11 @@ def main(argv):
     if not firmware:
         raise BootloaderError("firmware is empty")
 
+    if args.retries < 0:
+        raise BootloaderError("--retries must be >= 0")
+
     client = CanBootClient(args.interface, args.channel, args.bitrate,
-                           args.timeout, args.erase_timeout)
+                           args.timeout, args.erase_timeout, args.retries)
     try:
         upload(client, firmware, args.address, not args.no_erase,
                not args.no_crc, args.boot, args.legacy_data,

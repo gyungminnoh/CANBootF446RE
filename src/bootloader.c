@@ -25,6 +25,15 @@ typedef enum {
 static uint32_t current_write_addr = APP_START_ADDR;
 static uint16_t expected_seq;
 static uint8_t expected_fast_seq;
+static bool last_legacy_word_valid;
+static uint16_t last_legacy_seq;
+static uint32_t last_legacy_addr;
+static uint32_t last_legacy_word;
+static bool last_fast_frame_valid;
+static uint8_t last_fast_seq;
+static uint32_t last_fast_addr;
+static uint32_t last_fast_word0;
+static uint32_t last_fast_word1;
 static bool app_crc_valid;
 static app_state_t runtime_app_state = APP_STATE_INVALID;
 
@@ -93,6 +102,14 @@ static void bootloader_handle_fast_data_packet(const can_packet_t *pkt, bool che
     if (check_seq) {
         seq = (uint8_t)(pkt->id & 0xFFU);
         if (seq != expected_fast_seq) {
+            if (last_fast_frame_valid &&
+                (seq == last_fast_seq) &&
+                (last_fast_addr + 8U == current_write_addr) &&
+                (read_le32(&pkt->data[0]) == last_fast_word0) &&
+                (read_le32(&pkt->data[4]) == last_fast_word1)) {
+                (void)can_if_send_ack(CMD_DATA);
+                return;
+            }
             (void)can_if_send_nack(CMD_DATA, BOOT_ERR_SEQUENCE);
             return;
         }
@@ -115,6 +132,11 @@ static void bootloader_handle_fast_data_packet(const can_packet_t *pkt, bool che
 
     current_write_addr += 8U;
     if (check_seq) {
+        last_fast_frame_valid = true;
+        last_fast_seq = seq;
+        last_fast_addr = current_write_addr - 8U;
+        last_fast_word0 = word0;
+        last_fast_word1 = word1;
         expected_fast_seq++;
     }
     app_crc_valid = false;
@@ -332,6 +354,8 @@ void bootloader_handle_packet(const can_packet_t *pkt)
             current_write_addr = APP_START_ADDR;
             expected_seq = 0;
             expected_fast_seq = 0;
+            last_legacy_word_valid = false;
+            last_fast_frame_valid = false;
             app_crc_valid = false;
             runtime_app_state = APP_STATE_UPDATE_IN_PROGRESS;
             (void)can_if_send_ack(CMD_ERASE);
@@ -359,6 +383,8 @@ void bootloader_handle_packet(const can_packet_t *pkt)
         current_write_addr = address;
         expected_seq = 0;
         expected_fast_seq = 0;
+        last_legacy_word_valid = false;
+        last_fast_frame_valid = false;
         app_crc_valid = false;
         (void)can_if_send_ack(CMD_SET_ADDR);
         break;
@@ -381,18 +407,29 @@ void bootloader_handle_packet(const can_packet_t *pkt)
         }
 
         seq = (uint16_t)pkt->data[1] | ((uint16_t)pkt->data[2] << 8);
+        word = read_le32(&pkt->data[3]);
+
         if (seq != expected_seq) {
+            if (last_legacy_word_valid &&
+                (seq == last_legacy_seq) &&
+                (last_legacy_addr + sizeof(uint32_t) == current_write_addr) &&
+                (word == last_legacy_word)) {
+                (void)can_if_send_ack(CMD_DATA);
+                break;
+            }
             (void)can_if_send_nack(CMD_DATA, BOOT_ERR_SEQUENCE);
             break;
         }
-
-        word = read_le32(&pkt->data[3]);
 
         if (!flash_if_write_word(current_write_addr, word)) {
             (void)can_if_send_nack(CMD_DATA, BOOT_ERR_FLASH_WRITE);
             break;
         }
 
+        last_legacy_word_valid = true;
+        last_legacy_seq = seq;
+        last_legacy_addr = current_write_addr;
+        last_legacy_word = word;
         current_write_addr += sizeof(uint32_t);
         expected_seq++;
         app_crc_valid = false;

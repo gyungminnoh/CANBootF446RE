@@ -418,12 +418,14 @@ Linux SocketCAN setup example:
 
 ```bash
 sudo ip link set can0 up type can bitrate 500000
-python3 tools/can_uploader.py --interface socketcan --channel can0 firmware.bin
+python3 tools/can_uploader.py --interface socketcan --channel can0 --retries 3 firmware.bin
 ```
 
 Default upload mode uses CAN IDs `0x200-0x2FF` for sequence-checked 8-byte data frames. Add `--raw-fast-data` to use the older raw `0x102` data ID, or `--legacy-data` to use the original `0x101` `CMD_DATA` frame format.
 
 If the test app is already running, the uploader detects app PING version `0xA0.0x01`, sends `CMD_RESET`, waits for the bootloader, and then starts the upload.
+
+The uploader retries retry-safe transfers on CAN send errors or ACK timeout. NACK responses are treated as explicit bootloader rejection and are not retried. Data frame retry is safe for the sequenced fast path because the bootloader ACKs an exact duplicate of the most recently committed frame instead of trying to write it again.
 
 Validated sequence mismatch example:
 
@@ -433,5 +435,27 @@ Validated sequence mismatch example:
 ```
 
 `0x06` is `SEQUENCE`.
+
+Hardware regression test:
+
+```bash
+python3 tools/test_can_bootloader.py \
+  --interface socketcan \
+  --channel can0 \
+  --timeout 2 \
+  --erase-timeout 10 \
+  .pio/build/nucleo_f446re_test_app/firmware.bin
+```
+
+Validated result:
+
+```text
+[TEST] invalid address NACK
+[TEST] sequence mismatch NACK
+[TEST] interrupted update state
+[TEST] CRC mismatch NACK
+[TEST] full upload and boot
+[TEST] PASS
+```
 
 Windows support should be added later through python-can backends such as `slcan`, `pcan`, or vendor-specific drivers.

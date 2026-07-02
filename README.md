@@ -59,11 +59,27 @@ sudo ip link set can0 up type can bitrate 500000
   --channel can0 \
   --timeout 2 \
   --erase-timeout 10 \
+  --retries 3 \
   .pio/build/nucleo_f446re_test_app/firmware.bin \
   --boot
 ```
 
 The uploader can detect the included test app, request bootloader reset over CAN, erase the app area, upload the binary, verify CRC, and boot the app.
+
+## Hardware test
+
+With the board and CAN interface connected:
+
+```bash
+.venv/bin/python tools/test_can_bootloader.py \
+  --interface socketcan \
+  --channel can0 \
+  --timeout 2 \
+  --erase-timeout 10 \
+  .pio/build/nucleo_f446re_test_app/firmware.bin
+```
+
+The test covers PING/INFO, invalid address NACK, sequence mismatch NACK, interrupted update state, CRC mismatch NACK, and full upload/boot.
 
 ## Notes
 
@@ -71,5 +87,6 @@ The uploader can detect the included test app, request bootloader reset over CAN
 - The project uses HSE bypass 8 MHz from the ST-Link MCO path.
 - The bootloader never writes below `APP_START_ADDR`.
 - If an update is interrupted after erase, metadata remains invalid/erased and the device stays in bootloader mode.
+- The uploader retries retry-safe transfers on timeout/send errors. NACK responses are not retried.
 
 More implementation details are in `docs/stage1_app_jump.md`.
