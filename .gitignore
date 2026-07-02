@@ -1,0 +1,10 @@
+.pio/
+.venv/
+.vscode/
+__pycache__/
+*.py[cod]
+*.elf
+*.bin
+*.hex
+*.map
+.DS_Store
