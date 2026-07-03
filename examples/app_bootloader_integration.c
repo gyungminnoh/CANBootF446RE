@@ -4,7 +4,7 @@
  * Copy the relevant pieces into the real app:
  * - SCB->VTOR relocation in main()
  * - boot_request.c/h and boot_config.h
- * - CAN command handler for CMD_PING and CMD_RESET
+ * - CAN command handler for CMD_PING and CMD_RESET on the node-specific ID
  */
 
 #include "boot_config.h"

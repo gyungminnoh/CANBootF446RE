@@ -49,9 +49,10 @@ Flash erase/write, CRC verification, and persistent app metadata are implemented
 
 #define BOOT_UPDATE_WAIT_MS     500UL
 
-#define CAN_HOST_CMD_ID         0x101U
-#define CAN_HOST_SEQ_DATA_BASE_ID 0x200U
-#define CAN_BOOT_RESP_ID        0x181U
+#define BOOT_NODE_ID            0U
+#define CAN_HOST_CMD_ID         (0x100U + BOOT_NODE_ID)
+#define CAN_HOST_SEQ_DATA_BASE_ID (0x200U + (BOOT_NODE_ID * 0x10U))
+#define CAN_BOOT_RESP_ID        (0x180U + BOOT_NODE_ID)
 ```
 
 ## App validation rule
@@ -138,25 +139,25 @@ pio run -e nucleo_f446re_test_app
 The app responds to PING as:
 
 ```text
-181#7901A00100000000
+180#7901A00100000000
 ```
 
 Sending `CMD_RESET` requests bootloader mode:
 
 ```text
-101#0800000000000000
+100#0800000000000000
 ```
 
 The app ACK includes byte 2 set to `1` when the boot request magic was written successfully:
 
 ```text
-181#7908010000000000
+180#7908010000000000
 ```
 
 After reset, the bootloader responds to PING as:
 
 ```text
-181#7901000100000000
+180#7901000100000000
 ```
 
 ## CAN PING test
@@ -179,7 +180,7 @@ candump can0
 Terminal 2:
 
 ```bash
-cansend can0 101#0100000000000000
+cansend can0 100#0100000000000000
 ```
 
 Expected response:
@@ -222,8 +223,8 @@ Example:
 Validated result after uploader boot:
 
 ```text
-101#0100000000000000
-181#7901A00100000000
+100#0100000000000000
+180#7901A00100000000
 ```
 
 Validated uploader output:
@@ -253,13 +254,13 @@ The bootloader sectors 0-3 are not erased. Sector 7 is erased with the app, so m
 CAN command:
 
 ```text
-101#0300000000000000
+100#0300000000000000
 ```
 
 Successful response:
 
 ```text
-181#7903000000000000
+180#7903000000000000
 ```
 
 ## Current write commands
@@ -269,15 +270,15 @@ Successful response:
 Example for `0x08010000`:
 
 ```text
-101#0400000108000000
-181#7904000000000000
+100#0400000108000000
+180#7904000000000000
 ```
 
 Bootloader-region addresses are rejected. Example for `0x08000000`:
 
 ```text
-101#0400000008000000
-181#1F04040000000000
+100#0400000008000000
+180#1F04040000000000
 ```
 
 The uploader reports this as:
@@ -297,24 +298,24 @@ The checksum is the 8-bit sum of bytes 0-6.
 The faster uploader path uses sequence-encoded data CAN IDs:
 
 ```text
-Host data IDs: 0x200-0x2FF
-Sequence:      arbitration_id & 0xFF
+Host data IDs: 0x200 + node_id * 0x10 through 0x20F + node_id * 0x10
+Sequence:      arbitration_id & 0x0F
 Payload:       [data0, data1, data2, data3, data4, data5, data6, data7]
 Response:      [ACK, CMD_DATA, 0, 0, 0, 0, 0, 0]
 ```
 
-This mode writes two 32-bit words per CAN frame. `CMD_SET_ADDR` selects the starting Flash address and resets the expected sequence to 0. The sequence wraps modulo 256.
+This mode writes two 32-bit words per CAN frame. `CMD_SET_ADDR` selects the starting Flash address and resets the expected sequence to 0. The sequence wraps modulo 16.
 
-The older raw fast path on CAN ID `0x102` is still accepted for compatibility and can be selected with `--raw-fast-data`. The legacy 4-byte `CMD_DATA` protocol remains available with `--legacy-data`.
+The older raw fast path on CAN ID `0x110 + node_id` is still accepted for compatibility and can be selected with `--raw-fast-data`. The legacy 4-byte `CMD_DATA` protocol remains available with `--legacy-data`.
 
 Example writes:
 
 ```text
-101#0500000000022027
-181#7905000000000000
+100#0500000000022027
+180#7905000000000000
 
-101#050100C5010108D5
-181#7905000000000000
+100#050100C5010108D5
+180#7905000000000000
 ```
 
 Readback after these frames:
@@ -386,7 +387,7 @@ page 5: metadata app_crc
 The Python uploader reads these pages before erase/write and prints the memory map:
 
 ```text
-INFO ok: protocol 1.0, flags 0x01, app 0x08010000-0x0807FFF0, meta 0x0807FFF0, state VALID, size 5896, crc 0x310E0090
+INFO ok: protocol 1.0, node 0, app 0x08010000-0x0807FFF0, meta 0x0807FFF0, state VALID, size 5896, crc 0x310E0090
 ```
 
 Validated interrupted-update behavior:
@@ -419,7 +420,7 @@ sudo ip link set can0 up type can bitrate 500000
 python3 tools/can_uploader.py --interface socketcan --channel can0 --retries 3 firmware.bin
 ```
 
-Default upload mode uses CAN IDs `0x200-0x2FF` for sequence-checked 8-byte data frames. Add `--raw-fast-data` to use the older raw `0x102` data ID, or `--legacy-data` to use the original `0x101` `CMD_DATA` frame format.
+Default upload mode uses CAN IDs `0x200 + node_id * 0x10` through `0x20F + node_id * 0x10` for sequence-checked 8-byte data frames. Add `--raw-fast-data` to use the older raw node data ID, or `--legacy-data` to use the node command ID `CMD_DATA` frame format.
 
 If the test app is already running, the uploader detects app PING version `0xA0.0x01`, sends `CMD_RESET`, waits for the bootloader, and then starts the upload.
 
@@ -429,7 +430,7 @@ Validated sequence mismatch example:
 
 ```text
 201#FFFFFFFFFFFFFFFF
-181#1F05060000000000
+180#1F05060000000000
 ```
 
 `0x06` is `SEQUENCE`.

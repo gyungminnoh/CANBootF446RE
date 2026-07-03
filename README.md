@@ -15,10 +15,11 @@ The test application is linked with `linker/STM32F446RETX_APP_FLASH.ld`, which m
 
 ## CAN protocol
 
-- Host command ID: `0x101`
-- Bootloader response ID: `0x181`
-- Sequenced fast data IDs: `0x200` to `0x2FF`
-- Legacy raw fast data ID: `0x102`
+- Node ID range: `0` to `15`, selected at build time with `BOOT_NODE_ID`
+- Host command ID: `0x100 + node_id`
+- Bootloader response ID: `0x180 + node_id`
+- Sequenced fast data IDs: `0x200 + node_id * 0x10 + seq_low4`
+- Legacy raw fast data ID: `0x110 + node_id`
 
 Implemented commands:
 
@@ -38,6 +39,16 @@ The default uploader path writes 8 bytes per CAN frame using `0x200 | seq`, then
 ```bash
 pio run -e nucleo_f446re
 pio run -e nucleo_f446re_test_app
+```
+
+The default build uses `BOOT_NODE_ID=0`. For another board, add a node-specific build flag:
+
+```ini
+[env:nucleo_f446re_node1]
+extends = env:nucleo_f446re
+build_flags =
+  ${env:nucleo_f446re.build_flags}
+  -D BOOT_NODE_ID=1
 ```
 
 ## Flash bootloader with ST-Link
@@ -60,6 +71,7 @@ sudo ip link set can0 up type can bitrate 500000
   --timeout 2 \
   --erase-timeout 10 \
   --retries 3 \
+  --node-id 0 \
   .pio/build/nucleo_f446re_test_app/firmware.bin \
   --boot
 ```
@@ -76,6 +88,7 @@ With the board and CAN interface connected:
   --channel can0 \
   --timeout 2 \
   --erase-timeout 10 \
+  --node-id 0 \
   .pio/build/nucleo_f446re_test_app/firmware.bin
 ```
 

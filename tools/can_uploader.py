@@ -11,10 +11,16 @@ try:
 except ImportError:
     can = None
 
-HOST_CMD_ID = 0x101
-HOST_DATA_ID = 0x102
-HOST_SEQ_DATA_BASE_ID = 0x200
-BOOT_RESP_ID = 0x181
+HOST_CMD_BASE_ID = 0x100
+HOST_DATA_BASE_ID = 0x110
+HOST_SEQ_DATA_ROOT_ID = 0x200
+BOOT_RESP_BASE_ID = 0x180
+NODE_ID_MAX = 15
+
+HOST_CMD_ID = HOST_CMD_BASE_ID
+HOST_DATA_ID = HOST_DATA_BASE_ID
+HOST_SEQ_DATA_BASE_ID = HOST_SEQ_DATA_ROOT_ID
+BOOT_RESP_ID = BOOT_RESP_BASE_ID
 
 APP_START_ADDR = 0x08010000
 
@@ -88,9 +94,12 @@ def make_frame(cmd, payload=b""):
 
 class CanBootClient:
     def __init__(self, interface, channel, bitrate, timeout, erase_timeout,
-                 retries):
+                 retries, node_id=0):
         if can is None:
             raise BootloaderError("python-can is not installed")
+
+        if node_id < 0 or node_id > NODE_ID_MAX:
+            raise BootloaderError(f"node_id must be in range 0..{NODE_ID_MAX}")
 
         kwargs = {
             "interface": interface,
@@ -103,6 +112,11 @@ class CanBootClient:
         self.timeout = timeout
         self.erase_timeout = erase_timeout
         self.retries = retries
+        self.node_id = node_id
+        self.host_cmd_id = HOST_CMD_BASE_ID + node_id
+        self.host_data_id = HOST_DATA_BASE_ID + node_id
+        self.host_seq_data_base_id = HOST_SEQ_DATA_ROOT_ID + (node_id * 0x10)
+        self.boot_resp_id = BOOT_RESP_BASE_ID + node_id
 
     def close(self):
         self.bus.shutdown()
@@ -111,7 +125,7 @@ class CanBootClient:
         while self.bus.recv(timeout=0.0) is not None:
             pass
 
-    def send(self, data, arbitration_id=HOST_CMD_ID):
+    def send(self, data, arbitration_id):
         try:
             self.bus.send(can.Message(arbitration_id=arbitration_id,
                                       data=data,
@@ -129,7 +143,7 @@ class CanBootClient:
             msg = self.bus.recv(timeout=max(0.0, deadline - time.monotonic()))
             if msg is None:
                 break
-            if msg.is_extended_id or msg.arbitration_id != BOOT_RESP_ID:
+            if msg.is_extended_id or msg.arbitration_id != self.boot_resp_id:
                 continue
             data = bytes(msg.data).ljust(8, b"\x00")
             if data[0] == ACK and data[1] == expected_cmd:
@@ -164,7 +178,7 @@ class CanBootClient:
         raise last_error
 
     def command(self, cmd, payload=b"", timeout=None, retryable=True):
-        return self.transact(HOST_CMD_ID, make_frame(cmd, payload), cmd,
+        return self.transact(self.host_cmd_id, make_frame(cmd, payload), cmd,
                              timeout=timeout, retryable=retryable)
 
     def ping(self):
@@ -184,15 +198,15 @@ class CanBootClient:
             raise ValueError("word_bytes must be exactly 4 bytes")
         header = bytes([CMD_DATA, seq & 0xFF, (seq >> 8) & 0xFF]) + word_bytes
         data = header + bytes([checksum8(header)])
-        return self.transact(HOST_CMD_ID, data, CMD_DATA,
+        return self.transact(self.host_cmd_id, data, CMD_DATA,
                              retryable=True)
 
     def write_data8(self, data, seq=None):
         if len(data) != 8:
             raise ValueError("data must be exactly 8 bytes")
-        arbitration_id = HOST_DATA_ID
+        arbitration_id = self.host_data_id
         if seq is not None:
-            arbitration_id = HOST_SEQ_DATA_BASE_ID | (seq & 0xFF)
+            arbitration_id = self.host_seq_data_base_id | (seq & 0x0F)
         return self.transact(arbitration_id, data, CMD_DATA,
                              retryable=(seq is not None))
 
@@ -246,7 +260,7 @@ def upload(client, firmware, address, do_erase, do_crc, do_boot, legacy_data,
     print(
         "INFO ok: "
         f"protocol {info0[5]}.{info0[6]}, "
-        f"flags 0x{info0[7]:02X}, "
+        f"node {info0[7]}, "
         f"app 0x{app_start:08X}-0x{app_end:08X}, "
         f"meta 0x{app_meta:08X}, "
         f"state {app_state}, "
@@ -341,13 +355,15 @@ def parse_args(argv):
     parser.add_argument("--erase-timeout", type=float, default=10.0)
     parser.add_argument("--retries", type=int, default=3,
                         help="retry count for retry-safe transfers")
+    parser.add_argument("--node-id", type=int, default=0,
+                        help="target node id, range 0..15")
     parser.add_argument("--no-erase", action="store_true")
     parser.add_argument("--no-crc", action="store_true")
     parser.add_argument("--boot", action="store_true", help="send CMD_BOOT after upload")
     parser.add_argument("--legacy-data", action="store_true",
-                        help="use CMD_DATA on 0x101 with 4 data bytes per frame")
+                        help="use CMD_DATA on the node command ID with 4 data bytes per frame")
     parser.add_argument("--raw-fast-data", action="store_true",
-                        help="use raw 0x102 fast data frames without sequence")
+                        help="use the node raw fast data ID without sequence")
     return parser.parse_args(argv)
 
 
@@ -365,7 +381,8 @@ def main(argv):
         raise BootloaderError("--retries must be >= 0")
 
     client = CanBootClient(args.interface, args.channel, args.bitrate,
-                           args.timeout, args.erase_timeout, args.retries)
+                           args.timeout, args.erase_timeout, args.retries,
+                           args.node_id)
     try:
         upload(client, firmware, args.address, not args.no_erase,
                not args.no_crc, args.boot, args.legacy_data,

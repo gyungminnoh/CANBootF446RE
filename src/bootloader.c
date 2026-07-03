@@ -100,7 +100,7 @@ static void bootloader_handle_fast_data_packet(const can_packet_t *pkt, bool che
     }
 
     if (check_seq) {
-        seq = (uint8_t)(pkt->id & 0xFFU);
+        seq = (uint8_t)(pkt->id & CAN_HOST_SEQ_DATA_SEQ_MASK);
         if (seq != expected_fast_seq) {
             if (last_fast_frame_valid &&
                 (seq == last_fast_seq) &&
@@ -137,7 +137,8 @@ static void bootloader_handle_fast_data_packet(const can_packet_t *pkt, bool che
         last_fast_addr = current_write_addr - 8U;
         last_fast_word0 = word0;
         last_fast_word1 = word1;
-        expected_fast_seq++;
+        expected_fast_seq = (uint8_t)((expected_fast_seq + 1U) &
+                                      CAN_HOST_SEQ_DATA_SEQ_MASK);
     }
     app_crc_valid = false;
     (void)can_if_send_ack(CMD_DATA);
@@ -291,7 +292,7 @@ void bootloader_handle_packet(const can_packet_t *pkt)
             response[4] = BOOTLOADER_VERSION_MINOR;
             response[5] = 0x01U;
             response[6] = 0x00U;
-            response[7] = 0x01U;
+            response[7] = (uint8_t)BOOT_NODE_ID;
             (void)can_if_send_response(response, sizeof(response));
             break;
 

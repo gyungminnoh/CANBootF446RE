@@ -11,8 +11,6 @@ from can_uploader import (
     BOOTLOADER_VERSION_MAJOR,
     CMD_DATA,
     CMD_SET_ADDR,
-    HOST_CMD_ID,
-    HOST_SEQ_DATA_BASE_ID,
     BootloaderError,
     BootloaderNackError,
     CanBootClient,
@@ -91,7 +89,7 @@ def test_sequence_mismatch(client):
     client.set_addr(info["app_start"])
 
     try:
-        client.transact(HOST_SEQ_DATA_BASE_ID | 1, b"\xFF" * 8, CMD_DATA,
+        client.transact(client.host_seq_data_base_id | 1, b"\xFF" * 8, CMD_DATA,
                         retryable=False)
     except BootloaderNackError as exc:
         expect("SEQUENCE" in str(exc), "unexpected NACK for sequence mismatch")
@@ -156,6 +154,7 @@ def parse_args(argv):
     parser.add_argument("--timeout", type=float, default=2.0)
     parser.add_argument("--erase-timeout", type=float, default=10.0)
     parser.add_argument("--retries", type=int, default=3)
+    parser.add_argument("--node-id", type=int, default=0)
     parser.add_argument("--skip-destructive", action="store_true",
                         help="skip erase/write/reset tests")
     return parser.parse_args(argv)
@@ -172,7 +171,8 @@ def main(argv):
         raise TestFailure("firmware is empty")
 
     client = CanBootClient(args.interface, args.channel, args.bitrate,
-                           args.timeout, args.erase_timeout, args.retries)
+                           args.timeout, args.erase_timeout, args.retries,
+                           args.node_id)
     try:
         ensure_bootloader(client)
         test_info(client)

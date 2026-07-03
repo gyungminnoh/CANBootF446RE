@@ -8,7 +8,8 @@ This project already includes a test app under `src/app_test/`. Use this documen
 2. Set the vector table to `0x08010000` before enabling interrupts.
 3. Include the boot request implementation.
 4. Add a CAN command path that accepts `CMD_RESET`.
-5. Build a raw `.bin` and upload it with `tools/can_uploader.py`.
+5. Build bootloader and app with the same `BOOT_NODE_ID`.
+6. Build a raw `.bin` and upload it with `tools/can_uploader.py --node-id`.
 
 ## Linker Script
 
@@ -57,11 +58,18 @@ NVIC_SystemReset();
 
 ## CAN Update Command
 
-The included uploader detects the app by sending `CMD_PING` on CAN ID `0x101`. The app should respond on `0x181`:
+The included uploader detects the app by sending `CMD_PING` on the node-specific command ID:
 
 ```text
-Host -> App: 101#0100000000000000
-App  -> Host: 181#7901A00100000000
+command ID  = 0x100 + node_id
+response ID = 0x180 + node_id
+```
+
+For node 0, the app should respond as:
+
+```text
+Host -> App: 100#0100000000000000
+App  -> Host: 180#7901A00100000000
 ```
 
 When the app receives `CMD_RESET`, it should:
@@ -71,13 +79,39 @@ When the app receives `CMD_RESET`, it should:
 3. Reset the MCU.
 
 ```text
-Host -> App: 101#0800000000000000
-App  -> Host: 181#7908010000000000
+Host -> App: 100#0800000000000000
+App  -> Host: 180#7908010000000000
 ```
 
 After reset, the bootloader sees the request and stays in CAN update mode.
 
 See `examples/app_bootloader_integration.c` for a compact implementation.
+
+## Node ID
+
+Each board uses a build-time node ID:
+
+```c
+#define BOOT_NODE_ID 0U
+```
+
+Supported range is `0..15`.
+
+For PlatformIO, create a node-specific environment:
+
+```ini
+[env:nucleo_f446re_node1]
+extends = env:nucleo_f446re
+build_flags =
+  ${env:nucleo_f446re.build_flags}
+  -D BOOT_NODE_ID=1
+```
+
+Build the bootloader and matching app with the same node ID. Upload with the same value:
+
+```bash
+.venv/bin/python tools/can_uploader.py --node-id 1 firmware.bin
+```
 
 ## Build Output
 
@@ -90,6 +124,7 @@ The uploader expects a raw `.bin` with no embedded address information. It write
   --timeout 2 \
   --erase-timeout 10 \
   --retries 3 \
+  --node-id 0 \
   path/to/application.bin \
   --boot
 ```
@@ -100,7 +135,8 @@ The uploader expects a raw `.bin` with no embedded address information. It write
 - App linker reserves the last 16 bytes of Flash.
 - `SCB->VTOR = APP_START_ADDR` runs before enabling interrupts.
 - App uses the same CAN bitrate as the bootloader.
-- App handles `CMD_PING` and `CMD_RESET` on CAN ID `0x101`.
+- App and bootloader are built with the same `BOOT_NODE_ID`.
+- App handles `CMD_PING` and `CMD_RESET` on CAN ID `0x100 + node_id`.
 - App writes boot request with `boot_request_set()`.
 - App resets with `NVIC_SystemReset()`.
 - App `.bin` is uploaded with `APP_START_ADDR = 0x08010000`.
