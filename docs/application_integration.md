@@ -11,6 +11,50 @@ This project already includes a test app under `src/app_test/`. Use this documen
 5. Build bootloader and app with the same `BOOT_NODE_ID`.
 6. Build a raw `.bin` and upload it with `tools/can_uploader.py --node-id`.
 
+## One-Step PlatformIO Preparation
+
+For a PlatformIO STM32 app project, this repository provides a helper script:
+
+```bash
+python tools/integrate_platformio_app.py /path/to/app_project \
+  --base-env nucleo_f446re \
+  --app-env nucleo_f446re_boot \
+  --node-id 0
+```
+
+Use `--dry-run` first to preview the changes:
+
+```bash
+python tools/integrate_platformio_app.py /path/to/app_project --dry-run
+```
+
+The script copies:
+
+```text
+include/boot_config.h
+include/boot_request.h
+include/can_if.h
+src/boot_request.c
+linker/STM32F446RETX_APP_FLASH.ld
+examples/app_bootloader_integration.c
+```
+
+It also appends a bootloader-linked PlatformIO environment:
+
+```ini
+[env:nucleo_f446re_boot]
+extends = env:nucleo_f446re
+board_build.ldscript = linker/STM32F446RETX_APP_FLASH.ld
+build_flags =
+    ${env:nucleo_f446re.build_flags}
+    -D BOOT_NODE_ID=0
+```
+
+The script cannot safely edit arbitrary app logic, so these manual changes remain:
+
+- Add `SCB->VTOR = APP_START_ADDR` at the start of app `main()`.
+- Connect the app's CAN RX path to the copied bootloader command handler.
+
 ## Linker Script
 
 Set the app Flash origin and length:

@@ -78,6 +78,17 @@ sudo ip link set can0 up type can bitrate 500000
 
 The uploader can detect the included test app, request bootloader reset over CAN, erase the app area, upload the binary, verify CRC, and boot the app.
 
+## Prepare Another PlatformIO App
+
+```bash
+python tools/integrate_platformio_app.py /path/to/app_project \
+  --base-env nucleo_f446re \
+  --app-env nucleo_f446re_boot \
+  --node-id 0
+```
+
+Run with `--dry-run` first to preview file copies and `platformio.ini` changes.
+
 ## Hardware test
 
 With the board and CAN interface connected:
