@@ -90,3 +90,5 @@ The test covers PING/INFO, invalid address NACK, sequence mismatch NACK, interru
 - The uploader retries retry-safe transfers on timeout/send errors. NACK responses are not retried.
 
 More implementation details are in `docs/stage1_app_jump.md`.
+
+For integrating a real application, see `docs/application_integration.md`.

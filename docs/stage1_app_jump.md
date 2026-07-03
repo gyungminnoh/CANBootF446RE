@@ -8,9 +8,9 @@ CANBootF446RE/
   include/
     boot_config.h       Common addresses, CAN IDs, magic values
     bootloader.h        Bootloader public API
-    boot_request.h      SRAM boot request abstraction
-    can_if.h            CAN interface skeleton
-    flash_if.h          Flash address/sector helper skeleton
+    boot_request.h      RTC backup-register boot request abstraction
+    can_if.h            CAN interface
+    flash_if.h          Flash address/sector helper
     stm32f4xx_hal_conf.h
   src/
     main.c
@@ -22,7 +22,7 @@ CANBootF446RE/
   linker/
     STM32F446RETX_APP_FLASH.ld
   examples/
-    app_boot_request_example.c
+    app_bootloader_integration.c
 ```
 
 ## Current behavior
@@ -31,7 +31,7 @@ The current bootloader is intentionally minimal.
 
 1. Reset enters bootloader at `0x08000000`.
 2. HAL, GPIO, and CAN1 are initialized.
-3. SRAM boot magic is checked and cleared if present.
+3. RTC backup-register boot magic is checked and cleared if present.
 4. If boot magic is not set and the app vector table at `0x08010000` is valid, the bootloader waits `500 ms` for a CAN update request.
 5. If the app is invalid or boot magic was set, the bootloader remains in a simple CAN polling loop.
 6. If no update request arrives during the wait window, the bootloader jumps to the app.
@@ -45,16 +45,12 @@ Flash erase/write, CRC verification, and persistent app metadata are implemented
 #define APP_START_ADDR          0x08010000UL
 #define FLASH_END_ADDR          0x08080000UL
 
-#define SRAM_START_ADDR         0x20000000UL
-#define SRAM_SIZE_BYTES         (128UL * 1024UL)
-#define SRAM_END_ADDR           (SRAM_START_ADDR + SRAM_SIZE_BYTES)
-
-#define BOOT_MAGIC_ADDR         (SRAM_END_ADDR - 4UL)
 #define BOOT_MAGIC_VALUE        0xB007C0DEUL
 
 #define BOOT_UPDATE_WAIT_MS     500UL
 
 #define CAN_HOST_CMD_ID         0x101U
+#define CAN_HOST_SEQ_DATA_BASE_ID 0x200U
 #define CAN_BOOT_RESP_ID        0x181U
 ```
 
@@ -72,7 +68,7 @@ CRC validation writes persistent metadata after `CMD_CRC` passes. On reset, the 
 For an application linked behind this bootloader, change Flash origin and length:
 
 ```ld
-FLASH (rx) : ORIGIN = 0x08010000, LENGTH = 448K
+FLASH (rx) : ORIGIN = 0x08010000, LENGTH = 448K - 16
 ```
 
 The provided sample is:
@@ -129,6 +125,8 @@ See:
 
 ```text
 src/app_test/main.c
+examples/app_bootloader_integration.c
+docs/application_integration.md
 ```
 
 The test app is linked at `0x08010000` with:
@@ -459,3 +457,5 @@ Validated result:
 ```
 
 Windows support should be added later through python-can backends such as `slcan`, `pcan`, or vendor-specific drivers.
+
+Real application integration notes are in `docs/application_integration.md`.
