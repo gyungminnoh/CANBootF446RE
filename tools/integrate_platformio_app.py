@@ -99,25 +99,245 @@ Node ID:
 
 Manual code changes still required:
 
-1. Set the vector table at the start of `main()`:
+## 1. Inspect The App's Current CAN Structure
+
+Before editing, inspect these files:
+
+```bash
+rg -n "CAN_HandleTypeDef|HAL_CAN|CAN1|RxFifo|Fifo0|SystemClock_Config|MX_CAN|while \\(1\\)|int main" src include
+```
+
+Classify the app as one of these cases:
+
+- **No CAN yet**: no `HAL_CAN_*` calls and no `CAN_HandleTypeDef`.
+- **Polling CAN**: code calls `HAL_CAN_GetRxFifoFillLevel()` or `HAL_CAN_GetRxMessage()` from the main loop.
+- **Interrupt CAN**: code uses `HAL_CAN_RxFifo0MsgPendingCallback()` or activates `CAN_IT_RX_FIFO0_MSG_PENDING`.
+- **RTOS/queue CAN**: callback pushes frames into a queue or task.
+
+For a very simple app, use the "No CAN yet" path below. For an existing CAN app, do not replace its CAN logic; insert the bootloader handler as an extra command path.
+
+## 2. Set Vector Table At App Startup
+
+Edit the real app's `main()` file. Add this include near the top:
+
+```c
+#include "boot_config.h"
+```
+
+At the start of `main()`, before enabling peripheral interrupts, add:
 
 ```c
 SCB->VTOR = APP_START_ADDR;
 ```
 
-2. Include the bootloader command handler from:
+Expected shape:
+
+```c
+int main(void)
+{{
+    SCB->VTOR = APP_START_ADDR;
+
+    HAL_Init();
+    SystemClock_Config();
+    /* app init */
+}}
+```
+
+## 3. Add The Bootloader Command Handler
+
+The helper copied this file:
 
 ```text
 examples/app_bootloader_integration.c
 ```
 
-3. Connect the app's CAN RX path to:
+Use it as a reference. The key function is:
 
 ```c
 app_handle_bootloader_can_command(&rx_header, data);
 ```
 
-4. Build the app and upload the generated `.bin`:
+Recommended implementation choices:
+
+- For a small app, copy the whole function `app_handle_bootloader_can_command()` into the app's CAN source file or keep `examples/app_bootloader_integration.c` in the build.
+- If the app already has a CAN protocol dispatcher, call this function before the app's normal command switch. It returns without action when the CAN ID or command does not match.
+- Keep `app_request_bootloader_reset()` behavior unchanged: ACK first, then `boot_request_set()`, short delay, `NVIC_SystemReset()`.
+
+The handler expects node-specific IDs from `boot_config.h`:
+
+```text
+command ID  = 0x100 + BOOT_NODE_ID
+response ID = 0x180 + BOOT_NODE_ID
+```
+
+For this project:
+
+```text
+BOOT_NODE_ID = {node_id}
+```
+
+## 4. Connect The Handler To CAN RX
+
+### Case A: App Has No CAN Yet
+
+Add a global CAN handle if one does not exist:
+
+```c
+CAN_HandleTypeDef hcan1;
+```
+
+Add or generate CAN1 init for the same bitrate as the bootloader. Current bootloader timing is 500 kbit/s with APB1 at 45 MHz:
+
+```c
+static void MX_CAN1_Init(void)
+{{
+    hcan1.Instance = CAN1;
+    hcan1.Init.Prescaler = 5;
+    hcan1.Init.Mode = CAN_MODE_NORMAL;
+    hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
+    hcan1.Init.TimeSeg1 = CAN_BS1_15TQ;
+    hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+    hcan1.Init.TimeTriggeredMode = DISABLE;
+    hcan1.Init.AutoBusOff = ENABLE;
+    hcan1.Init.AutoWakeUp = DISABLE;
+    hcan1.Init.AutoRetransmission = ENABLE;
+    hcan1.Init.ReceiveFifoLocked = DISABLE;
+    hcan1.Init.TransmitFifoPriority = DISABLE;
+
+    if (HAL_CAN_Init(&hcan1) != HAL_OK) {{
+        Error_Handler();
+    }}
+}}
+```
+
+Configure a filter for this node's command ID and start CAN:
+
+```c
+static void App_CAN_Start(void)
+{{
+    CAN_FilterTypeDef filter = {{0}};
+
+    filter.FilterBank = 0;
+    filter.FilterMode = CAN_FILTERMODE_IDMASK;
+    filter.FilterScale = CAN_FILTERSCALE_32BIT;
+    filter.FilterIdHigh = (uint16_t)(CAN_HOST_CMD_ID << 5);
+    filter.FilterIdLow = 0;
+    filter.FilterMaskIdHigh = (uint16_t)(0x7FFU << 5);
+    filter.FilterMaskIdLow = 0;
+    filter.FilterFIFOAssignment = CAN_RX_FIFO0;
+    filter.FilterActivation = ENABLE;
+    filter.SlaveStartFilterBank = 14;
+
+    if (HAL_CAN_ConfigFilter(&hcan1, &filter) != HAL_OK) {{
+        Error_Handler();
+    }}
+
+    if (HAL_CAN_Start(&hcan1) != HAL_OK) {{
+        Error_Handler();
+    }}
+}}
+```
+
+Poll CAN in the main loop:
+
+```c
+static void App_CAN_Poll(void)
+{{
+    CAN_RxHeaderTypeDef rx_header = {{0}};
+    uint8_t data[8] = {{0}};
+
+    if (HAL_CAN_GetRxFifoFillLevel(&hcan1, CAN_RX_FIFO0) == 0U) {{
+        return;
+    }}
+
+    if (HAL_CAN_GetRxMessage(&hcan1, CAN_RX_FIFO0, &rx_header, data) != HAL_OK) {{
+        return;
+    }}
+
+    app_handle_bootloader_can_command(&rx_header, data);
+}}
+```
+
+Call the functions:
+
+```c
+MX_CAN1_Init();
+App_CAN_Start();
+
+while (1) {{
+    App_CAN_Poll();
+    /* existing app loop */
+}}
+```
+
+Also make sure CAN pins are configured for CAN1:
+
+```text
+PB8  -> CAN1_RX, AF9
+PB9  -> CAN1_TX, AF9
+```
+
+### Case B: App Already Polls CAN
+
+Find the place after `HAL_CAN_GetRxMessage()` succeeds. Add:
+
+```c
+app_handle_bootloader_can_command(&rx_header, data);
+```
+
+If the app has its own protocol switch, call the bootloader handler before it:
+
+```c
+app_handle_bootloader_can_command(&rx_header, data);
+app_handle_normal_can_command(&rx_header, data);
+```
+
+The bootloader handler ignores frames that are not for `CAN_HOST_CMD_ID`.
+
+### Case C: App Uses CAN RX Interrupts
+
+In `HAL_CAN_RxFifo0MsgPendingCallback()` after reading the frame, add:
+
+```c
+app_handle_bootloader_can_command(&rx_header, data);
+```
+
+If the callback must stay short, push the frame into the existing queue and call the handler from the CAN task/consumer instead.
+
+### Case D: App Uses RTOS Or A CAN Queue
+
+Do not reset directly from a low-level ISR if the app architecture forbids it. Call `app_handle_bootloader_can_command()` from the task that consumes CAN frames, or translate `CMD_RESET` into an app event that calls:
+
+```c
+boot_request_set();
+HAL_Delay(20);
+NVIC_SystemReset();
+```
+
+## 5. Verify Expected CAN Behavior
+
+After building and uploading once, the app should answer node {node_id} PING:
+
+```text
+Host -> App: {0x100 + node_id:03X}#0100000000000000
+App  -> Host: {0x180 + node_id:03X}#7901A00100000000
+```
+
+The app should enter bootloader mode on reset command:
+
+```text
+Host -> App: {0x100 + node_id:03X}#0800000000000000
+App  -> Host: {0x180 + node_id:03X}#7908010000000000
+```
+
+After reset, the bootloader should answer:
+
+```text
+Host -> Bootloader: {0x100 + node_id:03X}#0100000000000000
+Bootloader -> Host: {0x180 + node_id:03X}#7901000100000000
+```
+
+## 6. Build And Upload The Generated `.bin`
 
 ```bash
 pio run -e {app_env}
@@ -129,6 +349,14 @@ python /path/to/CANBootF446RE/tools/can_uploader.py \\
   .pio/build/{app_env}/firmware.bin \\
   --boot
 ```
+
+## 7. Common Failure Modes
+
+- No response to PING: CAN not initialized, wrong bitrate, wrong node ID, wrong filter, or transceiver wiring issue.
+- App runs once but cannot update again: `CMD_RESET` handler is not connected to the app CAN RX path.
+- HardFault after boot: missing `SCB->VTOR = APP_START_ADDR` or app linked at the wrong address.
+- Upload rejects firmware size: app is larger than `0x08010000..0x0807FFF0`.
+- Multiple boards respond: two boards were built with the same `BOOT_NODE_ID`.
 """
 
     print(f"write: {path.relative_to(project_dir)}")

@@ -55,6 +55,8 @@ The script cannot safely edit arbitrary app logic, so these manual changes remai
 - Add `SCB->VTOR = APP_START_ADDR` at the start of app `main()`.
 - Connect the app's CAN RX path to the copied bootloader command handler.
 
+The generated `docs/bootloader_integration_todo.md` is intentionally detailed enough for a developer or Codex to finish the app-specific edits. It first asks the editor to identify whether the app has no CAN, polling CAN, interrupt CAN, or RTOS/queue CAN, then gives the connection pattern for each case.
+
 ## Linker Script
 
 Set the app Flash origin and length:
