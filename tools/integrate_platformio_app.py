@@ -54,6 +54,7 @@ def make_boot_env_block(base_env, app_env, node_id, base_has_build_flags):
     if base_has_build_flags:
         lines.append(f"    ${{env:{base_env}.build_flags}}")
 
+    lines.append("    -D HSE_VALUE=8000000U")
     lines.append(f"    -D BOOT_NODE_ID={node_id}")
     lines.append("")
     return "\n".join(lines)
@@ -143,6 +144,44 @@ int main(void)
 }}
 ```
 
+Do not place this only in the example file. It must run in the app's real
+reset path before interrupts or CAN callbacks can use the relocated vector
+table.
+
+## 2a. Match The App Clock To The Bootloader Test Baseline
+
+For NUCLEO-F446RE in this project, the verified clock source is the ST-LINK MCO
+8 MHz clock on HSE bypass. If the app was created as a generic PlatformIO/Cube
+example, its `SystemClock_Config()` may still use HSI or a different HSE/PLL
+shape. That can make the app jump succeed but stop in `Error_Handler()` before
+CAN is initialized.
+
+Use this known-good oscillator setup unless the board hardware is intentionally
+different:
+
+```c
+RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
+RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+RCC_OscInitStruct.PLL.PLLM = 4;
+RCC_OscInitStruct.PLL.PLLN = 180;
+RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+RCC_OscInitStruct.PLL.PLLQ = 4;
+```
+
+Do not add `PLLR` for this F446 baseline unless the generated HAL code for the
+target explicitly requires it. A mismatched PLL field can make
+`HAL_RCC_OscConfig()` fail.
+
+The generated PlatformIO boot env should also define the HSE value:
+
+```ini
+build_flags =
+    -D HSE_VALUE=8000000U
+    -D BOOT_NODE_ID={node_id}
+```
+
 ## 3. Add The Bootloader Command Handler
 
 The helper copied this file:
@@ -210,12 +249,26 @@ static void MX_CAN1_Init(void)
 }}
 ```
 
-Configure a filter for this node's command ID and start CAN:
+Configure a filter for this node's command ID and start CAN. For first bring-up,
+an accept-all filter is often easier to debug; after PING/RESET are proven,
+switch to the exact node command filter if desired.
+
+Accept-all bring-up filter:
+
+```c
+filter.FilterIdHigh = 0;
+filter.FilterIdLow = 0;
+filter.FilterMaskIdHigh = 0;
+filter.FilterMaskIdLow = 0;
+```
+
+Exact node command filter:
 
 ```c
 static void App_CAN_Start(void)
 {{
     CAN_FilterTypeDef filter = {{0}};
+    uint32_t start_tick;
 
     filter.FilterBank = 0;
     filter.FilterMode = CAN_FILTERMODE_IDMASK;
@@ -230,6 +283,16 @@ static void App_CAN_Start(void)
 
     if (HAL_CAN_ConfigFilter(&hcan1, &filter) != HAL_OK) {{
         Error_Handler();
+    }}
+
+    CLEAR_BIT(CAN1->FMR, CAN_FMR_FINIT);
+
+    CLEAR_BIT(hcan1.Instance->MCR, CAN_MCR_SLEEP);
+    start_tick = HAL_GetTick();
+    while ((hcan1.Instance->MSR & CAN_MSR_SLAK) != 0U) {{
+        if ((HAL_GetTick() - start_tick) > 10U) {{
+            Error_Handler();
+        }}
     }}
 
     if (HAL_CAN_Start(&hcan1) != HAL_OK) {{
@@ -353,10 +416,19 @@ python /path/to/CANBootF446RE/tools/can_uploader.py \\
 ## 7. Common Failure Modes
 
 - No response to PING: CAN not initialized, wrong bitrate, wrong node ID, wrong filter, or transceiver wiring issue.
+- Bootloader PING works but app PING does not: halt with ST-Link and check `pc`.
+  If `pc` is inside `Error_Handler`, inspect `SystemClock_Config()` first,
+  especially HSE bypass, PLLQ, `HSE_VALUE`, and accidental `PLLR` settings.
 - App runs once but cannot update again: `CMD_RESET` handler is not connected to the app CAN RX path.
 - HardFault after boot: missing `SCB->VTOR = APP_START_ADDR` or app linked at the wrong address.
 - Upload rejects firmware size: app is larger than `0x08010000..0x0807FFF0`.
 - Multiple boards respond: two boards were built with the same `BOOT_NODE_ID`.
+- CAN frames visible in `candump` but app ignores them: verify the app command
+  ID is `0x100 + BOOT_NODE_ID`, response ID is `0x180 + BOOT_NODE_ID`, and the
+  CAN filter actually admits that ID.
+- App linked and uploaded correctly but never starts after `CMD_BOOT`: verify
+  the `.bin` was built from the boot env with
+  `board_build.ldscript = linker/STM32F446RETX_APP_FLASH.ld`.
 """
 
     print(f"write: {path.relative_to(project_dir)}")
